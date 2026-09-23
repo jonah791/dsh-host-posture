@@ -1,0 +1,4 @@
+- insert:
+    - id: agent-host-posture
+      name: dsh-host-posture
+      config: {}
