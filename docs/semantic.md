@@ -74,6 +74,7 @@
 | H-2 | 本机判定只认回环与本机名（含归一化） | 同上 `isLocalHost` 组（4 正 2 反） | 已实测 |
 | H-3 | 非本机端口探测被拒且指向 `dsh-engagement` | 同上边界组 | 已实测 |
 | H-4 | 本机端口探测可跑（回环 + 关闭端口快速返回） | 同上 | 已实测 |
+| H-4b | 造脚本函数都被 `runPs()` 包住（返回脚本 = 语义错） | `tests/wiring.test.mjs`（源码级 + 真跑，7/7 全绿） | 已实测 |
 | H-5 | 构建通过 | `tsc -p tsconfig.json` 退出码 0 | 已实测 |
 | H-6 | 挂载后 6 工具可答 | `posture_baseline` 返回基线文本 | 待验收 |
 | H-7 | 技能改指后不再悬空引用旧名 | `grep -n 'blue_baseline_check' ~/.agents/skills/windows-security-hardening/SKILL.md` 零命中 | 待验收 |
@@ -91,6 +92,7 @@
 | 日期 | 修订 |
 |---|---|
 | 2026-09-23 | 首版：从 `dsh-engagement` 的移植层复用三个模块（`blue-host` / `blue-net` / `blue-logic` → `host` / `net` / `logic`），加 6 工具与两条边界。**建立本件的原因**：融合设计 §10 步骤 2 规定「在 `dsh-host-posture` 就位前不 unmount `dsh-blue-team`」——技能 `windows-security-hardening` 正引用 `blue_baseline_check`，先退役会留下悬空引用。 |
+| 2026-09-24 | **上线即抓出接线缺陷**：`posture_baseline` 返回的是 **PowerShell 脚本源码**而不是执行结果——`host.ts` 的 `baselineCheck()` / `auditConnections()` / `auditAutoruns()` / `queryEventLog()` / `hashFile()` **都是造脚本**，必须交给 `runPs()` 执行。加载冒烟、`tsc`、边界测试全绿都拦不住它：**返回值类型对（都是 string），语义错（一个是脚本、一个是结果）**。修复 5 处调用点 + 补 `tests/wiring.test.mjs`（源码级断言「每个造脚本函数都被 `runPs(` 包住」+ 真跑一次断言输出不含 `$ErrorActionPreference`）。 |
 
 ## 10 · 未决问题
 

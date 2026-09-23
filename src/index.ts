@@ -19,7 +19,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
-import { auditAutoruns, auditConnections, baselineCheck, hashFile, queryEventLog } from './host.js'
+import { auditAutoruns, auditConnections, baselineCheck, hashFile, queryEventLog, runPs } from './host.js'
 import { parseEventIds } from './logic.js'
 import { parsePorts, scanPorts } from './net.js'
 
@@ -70,7 +70,7 @@ export function apply(ctx: Context, config: Config): void {
     parameters: {},
     output: textOut,
     async execute() {
-      const out = baselineCheck()
+      const out = await runPs(baselineCheck())
       return { text: cut(out.trim() === '' ? '（基线检查无输出）' : out) }
     },
   }))
@@ -84,7 +84,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     output: textOut,
     async execute(args: { limit?: number }) {
-      return { text: cut(auditConnections(typeof args.limit === 'number' ? args.limit : 200)) }
+      return { text: cut(await runPs(auditConnections(typeof args.limit === 'number' ? args.limit : 200))) }
     },
   }))
 
@@ -97,7 +97,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     output: textOut,
     async execute(args: { limit?: number }) {
-      return { text: cut(auditAutoruns(typeof args.limit === 'number' ? args.limit : 100)) }
+      return { text: cut(await runPs(auditAutoruns(typeof args.limit === 'number' ? args.limit : 100))) }
     },
   }))
 
@@ -117,7 +117,7 @@ export function apply(ctx: Context, config: Config): void {
       const days = typeof args.days === 'number' ? args.days : config.defaultDays
       const log = args.logName ?? 'Security'
       const limit = typeof args.limit === 'number' ? args.limit : 100
-      return { text: cut(queryEventLog(ids, days, log, limit)) }
+      return { text: cut(await runPs(queryEventLog(ids, days, log, limit))) }
     },
   }))
 
@@ -156,7 +156,7 @@ export function apply(ctx: Context, config: Config): void {
     },
     output: textOut,
     async execute(args: { path: string }) {
-      const out = hashFile(args.path)
+      const out = await runPs(hashFile(args.path))
       return { text: cut(out.trim() === '' ? `（无输出：${args.path}）` : out) }
     },
   }))
