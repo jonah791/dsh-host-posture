@@ -2,3 +2,6 @@ node_modules
 lib/
 *.tsbuildinfo
 state/
+
+# 备份文件不进仓（内容在 git 历史里）
+*.bak-*
