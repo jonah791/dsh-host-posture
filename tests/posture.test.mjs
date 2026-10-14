@@ -84,6 +84,26 @@ import { queryEventLog, baselineCheck } from '../lib/host.js'
 
 const PS = 'C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
 
+/**
+ * ★ **平台守卫（2026-10-14 补）**：本件生产实现**依赖 Windows PowerShell**
+ *   （`C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe`）——在 WSL/Linux 上跑
+ *   必然 `spawnSync ... ENOENT`。
+ *
+ *   为什么是 **SKIP 而非 FAIL**（技能 `dsh-plugin-testability`：夹具不得依赖运行平台）：
+ *   这不是代码缺陷，是**环境错配**——同一份测试在 Windows 侧全绿、在 WSL 侧全红，
+ *   而两处的差异只在「宿主是不是 Windows」。把它留成 FAIL，等于让全量体检
+ *   永远报 4 条假账，**真账就被淹掉了**（本仓 `docs/known-gaps.md` 的同族纪律：
+ *   噪音会淹没信号）。
+ *
+ *   ⚠ 与 `dsh-model-test` 那条**同族、反向**：那条是「WSL 路径在 Windows 侧跑」，
+ *   这条是「Windows 路径在 WSL 侧跑」——**正解都是按平台 SKIP**。
+ *
+ *   ⚠ 边界如实：SKIP **不等于验证过**。这 4 条判据的活体验证只在 Windows 侧成立；
+ *   WSL 侧跑出来的绿**不覆盖它们**（别把「skip 0 fail」读成「判据都过了」）。
+ */
+const IS_WINDOWS = process.platform === 'win32'
+const WIN_ONLY = { skip: !IS_WINDOWS && '需 Windows PowerShell（生产实现依赖它；WSL 侧无法同构验证）' }
+
 /** 在真实 PowerShell 里跑脚本，**与生产同构**：`-Command <整段脚本>` 单 argv。
  *
  *  ⚠ 不能用 `-Command -` + stdin 喂脚本（我第一版就是这么写的，四条测试全红）：
@@ -98,7 +118,7 @@ function runPs(script, stub = '') {
   return out.trim()
 }
 
-test('尸体：读日志无权限 ⇒ status=DENIED（不再是伪装成空结果的 []）', () => {
+test('尸体：读日志无权限 ⇒ status=DENIED（不再是伪装成空结果的 []）', WIN_ONLY, () => {
   const stub = `function Get-WinEvent { throw [System.UnauthorizedAccessException]::new('Attempted to perform an unauthorized operation.') }`
   const raw = runPs(queryEventLog([4624, 4625], 7, 'Security', 10), stub)
   const got = JSON.parse(raw)
@@ -107,7 +127,7 @@ test('尸体：读日志无权限 ⇒ status=DENIED（不再是伪装成空结�
   assert.ok(!Array.isArray(got), 'DENIED 时不得吐裸数组（那正是旧缺陷的形状）')
 })
 
-test('对照：通道可读但零命中 ⇒ status=OK 且 count=0（与尸体落在不同格子）', () => {
+test('对照：通道可读但零命中 ⇒ status=OK 且 count=0（与尸体落在不同格子）', WIN_ONLY, () => {
   // 探针（-MaxEvents 1）要成功，查询要成功但返回空
   const stub = `function Get-WinEvent { param([Parameter(ValueFromRemainingArguments=$true)]$rest) return @() }`
   const raw = runPs(queryEventLog([4624], 7, 'Security', 10), stub)
@@ -116,7 +136,7 @@ test('对照：通道可读但零命中 ⇒ status=OK 且 count=0（与尸体落
   assert.equal(got.count, 0, 'OK 分支要带 count=0：' + raw)
 })
 
-test('共享判据：IPC$ 是 Windows 默认管理共享 ⇒ PASS（修误报，且不修过头）', () => {
+test('共享判据：IPC$ 是 Windows 默认管理共享 ⇒ PASS（修误报，且不修过头）', WIN_ONLY, () => {
   const stubIpc = `function Get-SmbShare { @([PSCustomObject]@{ Name='IPC$' }) }`
   const stubCustom = `function Get-SmbShare { @([PSCustomObject]@{ Name='IPC$' }, [PSCustomObject]@{ Name='MyShare' }) }`
   // 其它读源照旧（真机可读）；只在共享这一项上做单变量
@@ -128,10 +148,25 @@ test('共享判据：IPC$ 是 Windows 默认管理共享 ⇒ PASS（修误报，
   assert.equal(run(stubCustom).Status, 'WARN', '真自定义共享必须仍报 WARN（防修过头）')
 })
 
-test('共享判据：读失败 ⇒ UNKNOWN（不是 PASS）', () => {
+test('共享判据：读失败 ⇒ UNKNOWN（不是 PASS）', WIN_ONLY, () => {
   const stub = `function Get-SmbShare { throw [System.UnauthorizedAccessException]::new('denied') }`
   const raw = runPs(baselineCheck(), stub)
   const c = JSON.parse(raw).find((x) => x.Check === 'SMB_NonDefaultShares')
   assert.equal(c.Status, 'UNKNOWN', '读失败退化成 PASS 正是被修的缺陷：' + JSON.stringify(c))
   assert.ok(c.Detail.includes('读取失败'), 'UNKNOWN 要写清读取失败：' + c.Detail)
+})
+
+// ───────── 平台守卫的自证（防「跳过当通过」）─────────
+test('★ 平台守卫生效：非 Windows 平台必须把上面 4 条判成 SKIP（不是 PASS）', () => {
+  // 这条判据的存在理由：SKIP 与 PASS 在汇总里长得像（都是「没 fail」），
+  //   而它们说的是相反的事——PASS 是「判据过了」，SKIP 是「这里问不出来」。
+  //   没有这条，守卫一旦失效（比如 IS_WINDOWS 判错），4 条会静默变绿。
+  const expected = IS_WINDOWS ? 'run' : 'skip'
+  assert.equal(
+    typeof WIN_ONLY === 'object' && WIN_ONLY !== null && typeof WIN_ONLY.skip === 'string' ? 'skip' : 'run',
+    expected,
+    '平台守卫与 process.platform 不一致 ⇒ 那 4 条判据的去向不明',
+  )
+  // 边界如实：本测试只断言**守卫的方向**，不断言那 4 条判据的内容
+  //   （内容在 Windows 侧跑才算验证；WSL 侧的绿不覆盖它们）
 })
