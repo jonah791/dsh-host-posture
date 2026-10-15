@@ -88,13 +88,25 @@ $log = '${psQuote(logName)}'
 $probeErr = $null
 try { $null = Get-WinEvent -LogName $log -MaxEvents 1 -ErrorAction Stop } catch { $probeErr = $_.Exception.Message }
 if ($probeErr) {
+  # 2026-10-10 修（庄园成员「哨」的独立复核指出）：旧版把所有探针失败都硬编码成
+  #   「无权限」那一条 hint，而实测通道不存在时 reason 是
+  #   "There is not an event log on the localhost computer…" ⇒ hint 与 reason 自相矛盾。
+  #   ⇒ 现在按 reason 分辨子情形（cause 字段），判据未命中时**不假装知道**，如实标 UNKNOWN。
+  $cause = 'UNKNOWN'
+  $pe = [string]$probeErr
+  if ($pe -like '*unauthorized*' -or $pe -like '*Access is denied*' -or $pe -like '*拒绝访问*') { $cause = 'PERMISSION' }
+  elseif ($pe -like '*There is not an event log*' -or $pe -like '*不存在*') { $cause = 'NO_SUCH_CHANNEL' }
+  $hint = '通道探针失败，且判据未能分辨子情形（cause=UNKNOWN）——按 reason 原文判读，本工具不猜。'
+  if ($cause -eq 'PERMISSION') { $hint = '当前进程无权限读该日志（常见：非管理员读 Security 通道）。这不是「没有事件」——空与看不见是两件事。' }
+  if ($cause -eq 'NO_SUCH_CHANNEL') { $hint = '该日志通道在本机不存在（名字拼错，或该功能/角色未启用）。这是第三种情形：既不是无权限，也不是没有事件。' }
   [PSCustomObject]@{
     status='DENIED'
     logName=$log
     days=${days}
     eventIds=$idArr
-    reason=[string]$probeErr
-    hint='当前进程无权限读该日志（常见：非管理员读 Security 通道）。这不是「没有事件」——空与看不见是两件事。'
+    reason=$pe
+    cause=$cause
+    hint=$hint
   } | ConvertTo-Json -Compress -Depth 4
   exit 0
 }
@@ -105,8 +117,39 @@ try {
   $events = Get-WinEvent -FilterHashtable @{ LogName=$log; Id=$idArr; StartTime=$since } -MaxEvents ${limit} -ErrorAction Stop
 } catch { $queryErr = $_.Exception.Message }
 if ($queryErr) {
-  # 可读但查询报错（例如该日志不认这些 Id）—— 同样不许渲染成空
-  [PSCustomObject]@{ status='ERROR'; logName=$log; days=${days}; eventIds=$idArr; reason=[string]$queryErr } | ConvertTo-Json -Compress -Depth 4
+  # 2026-10-10 修（哨抓出的真缺陷 · 我的第一版修法「把病挪了格子」）：
+  #   旧症状：无权限 与「真的没事件」同形（都吐 []）。
+  #   我第一版：加①探针 ⇒ 无权限单独成一格；②查询报错一律 ERROR。
+  #   **但这让「可读 + 零命中」落进了 ERROR** —— Get-WinEvent 零命中时**抛异常**，
+  #   于是下面那条 status='OK', count=0 分支**结构上不可达**。
+  #   哨的实测：Application/999999 ⇒ ERROR（我宣称 OK,count=0）；本机 System 两天内无 7036
+  #   （没重启过服务）会被读成「工具坏了」，而正确语义是「确实没有」。
+  #   ⇒ 新旧同族：都是「两种语义共用一个格子」，只是换了哪两种。
+  #
+  #   判据（2026-10-10 实跑探测，非推断）：
+  #     零命中（带 FilterHashtable）        ⇒ System.Exception / "No events were found that match…"
+  #     无权限（带 FilterHashtable）        ⇒ **同一条消息**（与零命中同形！）
+  #     无权限（不带 FilterHashtable，即①） ⇒ "unauthorized operation" ⇒ 已被①拦下
+  #     通道不存在                          ⇒ "There is not an event log on the localhost computer…"
+  #   ⇒ 关键：**走到这里说明①已通过（通道可读）**，故 "No events were found" 只可能来自零命中。
+  #   ⚠ 语言依赖如实说：该消息取自 .NET 资源，非英文系统措辞可能不同 ⇒ 做成显式常量表，
+  #     匹配不上时**不假装**，退回 ERROR（保守：宁可说「我读不明白」也不谎报「没有」）。
+  $noMatchMsgs = @('No events were found that match the specified selection criteria.')
+  $isZero = $false
+  foreach ($m in $noMatchMsgs) { if ([string]$queryErr -like ('*' + $m + '*')) { $isZero = $true } }
+  if ($isZero) {
+    [PSCustomObject]@{
+      status='OK'
+      logName=$log
+      days=${days}
+      eventIds=$idArr
+      count=0
+      events=@()
+      note='通道可读、查询合法，但该时间窗/Id 组合下确实没有事件。「确实没有」与「读不到」是两件事。'
+    } | ConvertTo-Json -Compress -Depth 4
+    exit 0
+  }
+  [PSCustomObject]@{ status='ERROR'; logName=$log; days=${days}; eventIds=$idArr; reason=[string]$queryErr; note='查询失败，且异常消息与已知的「零命中」措辞不匹配 ⇒ 按错误上报（不渲染成空，也不谎报没有事件）。' } | ConvertTo-Json -Compress -Depth 4
   exit 0
 }
 $out = @(foreach ($e in $events) {
